@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import type { IUser } from '@rocket.chat/core-typings';
 import { Settings, Users, WorkspaceCredentials } from '@rocket.chat/models';
 import {
+	ajv,
 	isShieldSvgProps,
 	isSpotlightProps,
 	isDirectoryProps,
@@ -10,6 +11,8 @@ import {
 	isMethodCallAnonProps,
 	isFingerprintProps,
 	isMeteorCall,
+	validateUnauthorizedErrorResponse,
+	validateBadRequestErrorResponse,
 } from '@rocket.chat/rest-typings';
 import { escapeHTML } from '@rocket.chat/string-helpers';
 import EJSON from 'ejson';
@@ -169,16 +172,27 @@ import { getUserInfo } from '../helpers/getUserInfo';
  *              schema:
  *                $ref: '#/components/schemas/ApiFailureV1'
  */
-API.v1.addRoute(
-	'me',
-	{ authRequired: true, userWithoutUsername: true },
-	{
-		async get() {
-			const userFields = { ...getBaseUserFields(), services: 1 };
-			const user = (await Users.findOneById(this.userId, { projection: userFields })) as IUser;
+const meResponseSchema = ajv.compile({
+	type: 'object',
+	properties: { success: { type: 'boolean', enum: [true] } },
+	required: ['success'],
+	additionalProperties: true,
+});
 
-			return API.v1.success(await getUserInfo(user));
+API.v1.get(
+	'me',
+	{
+		authRequired: true,
+		response: {
+			200: meResponseSchema,
+			401: validateUnauthorizedErrorResponse,
 		},
+	},
+	async function action() {
+		const userFields = { ...getBaseUserFields(), services: 1 };
+		const user = (await Users.findOneById(this.userId, { projection: userFields })) as IUser;
+
+		return API.v1.success({ ...(await getUserInfo(user)), success: true });
 	},
 );
 
@@ -319,82 +333,124 @@ API.v1.addRoute(
 	},
 );
 
-API.v1.addRoute(
+const spotlightResponseSchema = ajv.compile({
+	type: 'object',
+	properties: {
+		users: { type: 'array', items: { type: 'object' } },
+		rooms: { type: 'array', items: { type: 'object' } },
+		success: { type: 'boolean', enum: [true] },
+	},
+	required: ['users', 'rooms', 'success'],
+	additionalProperties: false,
+});
+
+API.v1.get(
 	'spotlight',
 	{
 		authRequired: true,
-		validateParams: isSpotlightProps,
-	},
-	{
-		async get() {
-			const { query } = this.queryParams;
-
-			const result = await spotlightMethod({ text: query, userId: this.userId });
-
-			return API.v1.success(result);
+		query: isSpotlightProps,
+		response: {
+			200: spotlightResponseSchema,
+			401: validateUnauthorizedErrorResponse,
 		},
+	},
+	async function action() {
+		const { query } = this.queryParams;
+
+		const result = await spotlightMethod({ text: query, userId: this.userId });
+
+		return API.v1.success({ ...result, success: true });
 	},
 );
 
-API.v1.addRoute(
+const directoryResponseSchema = ajv.compile({
+	type: 'object',
+	properties: {
+		result: { type: 'array', items: { type: 'object' } },
+		count: { type: 'number' },
+		offset: { type: 'number' },
+		total: { type: 'number' },
+		success: { type: 'boolean', enum: [true] },
+	},
+	required: ['result', 'count', 'offset', 'total', 'success'],
+	additionalProperties: false,
+});
+
+API.v1.get(
 	'directory',
 	{
 		authRequired: true,
-		validateParams: isDirectoryProps,
-	},
-	{
-		async get() {
-			const { offset, count } = await getPaginationItems(this.queryParams);
-			const { sort, query } = await this.parseJsonQuery();
-			const { text, type, workspace = 'local' } = this.queryParams;
-
-			const filter = {
-				...(query ? { ...query } : {}),
-				...(text ? { text } : {}),
-				...(type ? { type } : {}),
-				...(workspace ? { workspace } : {}),
-			};
-
-			if (sort && Object.keys(sort).length > 1) {
-				return API.v1.failure('This method support only one "sort" parameter');
-			}
-			const sortBy = sort ? Object.keys(sort)[0] : undefined;
-			const sortDirection = sort && Object.values(sort)[0] === 1 ? 'asc' : 'desc';
-
-			const user = await Users.findOneById(this.userId, { projection: { __rooms: 1 } });
-			const result = await browseChannelsMethod(
-				{
-					...filter,
-					sortBy,
-					sortDirection,
-					offset: Math.max(0, offset),
-					limit: Math.max(0, count),
-				},
-				user,
-			);
-
-			if (!result) {
-				return API.v1.failure('Please verify the parameters');
-			}
-			return API.v1.success({
-				result: result.results,
-				count: result.results.length,
-				offset,
-				total: result.total,
-			});
+		query: isDirectoryProps,
+		response: {
+			200: directoryResponseSchema,
+			400: validateBadRequestErrorResponse,
+			401: validateUnauthorizedErrorResponse,
 		},
+	},
+	async function action() {
+		const { offset, count } = await getPaginationItems(this.queryParams);
+		const { sort, query } = await this.parseJsonQuery();
+		const { text, type, workspace = 'local' } = this.queryParams;
+
+		const filter = {
+			...(query ? { ...query } : {}),
+			...(text ? { text } : {}),
+			...(type ? { type } : {}),
+			...(workspace ? { workspace } : {}),
+		};
+
+		if (sort && Object.keys(sort).length > 1) {
+			return API.v1.failure('This method support only one "sort" parameter');
+		}
+		const sortBy = sort ? Object.keys(sort)[0] : undefined;
+		const sortDirection = sort && Object.values(sort)[0] === 1 ? 'asc' : 'desc';
+
+		const user = await Users.findOneById(this.userId, { projection: { __rooms: 1 } });
+		const result = await browseChannelsMethod(
+			{
+				...filter,
+				sortBy,
+				sortDirection,
+				offset: Math.max(0, offset),
+				limit: Math.max(0, count),
+			},
+			user,
+		);
+
+		if (!result) {
+			return API.v1.failure('Please verify the parameters');
+		}
+		return API.v1.success({
+			success: true,
+			result: result.results,
+			count: result.results.length,
+			offset,
+			total: result.total,
+		});
 	},
 );
 
-API.v1.addRoute(
+const pwGetPolicyResponseSchema = ajv.compile({
+	type: 'object',
+	properties: {
+		enabled: { type: 'boolean' },
+		policy: { type: 'array', items: { type: 'array' } },
+		success: { type: 'boolean', enum: [true] },
+	},
+	required: ['success'],
+	additionalProperties: true,
+});
+
+API.v1.get(
 	'pw.getPolicy',
 	{
 		authRequired: false,
-	},
-	{
-		get() {
-			return API.v1.success(passwordPolicy.getPasswordPolicy());
+		response: {
+			200: pwGetPolicyResponseSchema,
 		},
+	},
+	function action() {
+		return API.v1.success({ ...passwordPolicy.getPasswordPolicy(), success: true });
 	},
 );
 
@@ -447,6 +503,13 @@ declare module '@rocket.chat/rest-typings' {
 	}
 }
 
+const methodCallResponseSchema = ajv.compile({
+	type: 'object',
+	properties: { message: { type: 'string' } },
+	required: ['message'],
+	additionalProperties: false,
+});
+
 const mountResult = ({
 	id,
 	error,
@@ -468,135 +531,178 @@ const mountResult = ({
 
 // had to create two different endpoints for authenticated and non-authenticated calls
 // because restivus does not provide 'this.userId' if 'authRequired: false'
-API.v1.addRoute(
+API.v1.post(
 	'method.call/:method',
 	{
 		authRequired: true,
 		userWithoutUsername: true,
 		rateLimiterOptions: false,
-		validateParams: isMeteorCall,
+		body: isMeteorCall,
 		applyMeteorContext: true,
-	},
-	{
-		async post() {
-			check(this.bodyParams, {
-				message: String,
-			});
-
-			const data = EJSON.parse(this.bodyParams.message);
-
-			if (!isMethodCallProps(data)) {
-				return API.v1.failure('Invalid method call');
-			}
-
-			const { method, params, id } = data;
-
-			const connectionId =
-				this.token ||
-				crypto
-					.createHash('md5')
-					.update(this.requestIp + this.user._id)
-					.digest('hex');
-
-			const rateLimiterInput = {
-				userId: this.userId,
-				clientAddress: this.requestIp,
-				type: 'method',
-				name: method,
-				connectionId,
-			};
-
-			try {
-				DDPRateLimiter._increment(rateLimiterInput);
-				const rateLimitResult = DDPRateLimiter._check(rateLimiterInput);
-				if (!rateLimitResult.allowed) {
-					throw new Meteor.Error('too-many-requests', DDPRateLimiter.getErrorMessage(rateLimitResult), {
-						timeToReset: rateLimitResult.timeToReset,
-					});
-				}
-
-				return API.v1.success(mountResult({ id, result: await Meteor.callAsync(method, ...params) }));
-			} catch (err) {
-				if (!(err as any).isClientSafe && !(err as any).meteorError) {
-					SystemLogger.error({ msg: 'Exception while invoking method', err, method });
-				}
-
-				if (settings.get('Log_Level') === '2') {
-					Meteor._debug(`Exception while invoking method ${method}`, err);
-				}
-
-				return API.v1.failure(mountResult({ id, error: err }));
-			}
+		response: {
+			200: methodCallResponseSchema,
+			400: validateBadRequestErrorResponse,
+			401: validateUnauthorizedErrorResponse,
+			429: ajv.compile({
+				type: 'object',
+				properties: { success: { type: 'boolean', enum: [false] }, error: { type: 'string' } },
+				required: ['success'],
+				additionalProperties: true,
+			}),
 		},
+	},
+	async function action() {
+		check(this.bodyParams, {
+			message: String,
+		});
+
+		const data = EJSON.parse(this.bodyParams.message);
+
+		if (!isMethodCallProps(data)) {
+			return API.v1.failure('Invalid method call');
+		}
+
+		const { method, params, id } = data;
+
+		const connectionId =
+			this.token ||
+			crypto
+				.createHash('md5')
+				.update((this.requestIp ?? '') + this.user._id)
+				.digest('hex');
+
+		const rateLimiterInput = {
+			userId: this.userId,
+			clientAddress: this.requestIp,
+			type: 'method',
+			name: method,
+			connectionId,
+		};
+
+		try {
+			DDPRateLimiter._increment(rateLimiterInput);
+			const rateLimitResult = DDPRateLimiter._check(rateLimiterInput);
+			if (!rateLimitResult.allowed) {
+				throw new Meteor.Error('too-many-requests', DDPRateLimiter.getErrorMessage(rateLimitResult), {
+					timeToReset: rateLimitResult.timeToReset,
+				});
+			}
+
+			return API.v1.success(mountResult({ id, result: await Meteor.callAsync(method, ...params) }));
+		} catch (err) {
+			if (!(err as any).isClientSafe && !(err as any).meteorError) {
+				SystemLogger.error({ msg: 'Exception while invoking method', err, method });
+			}
+
+			if (settings.get('Log_Level') === '2') {
+				Meteor._debug(`Exception while invoking method ${method}`, err);
+			}
+
+			return API.v1.failure(mountResult({ id, error: err }));
+		}
 	},
 );
 
-API.v1.addRoute(
+API.v1.post(
 	'method.callAnon/:method',
 	{
 		authRequired: false,
 		userWithoutUsername: true,
 		rateLimiterOptions: false,
-		validateParams: isMeteorCall,
+		body: isMeteorCall,
 		applyMeteorContext: true,
-	},
-	{
-		async post() {
-			check(this.bodyParams, {
-				message: String,
-			});
-
-			const data = EJSON.parse(this.bodyParams.message);
-
-			if (!isMethodCallAnonProps(data)) {
-				return API.v1.failure('Invalid method call');
-			}
-
-			const { method, params, id } = data;
-
-			const connectionId = this.token || crypto.createHash('md5').update(this.requestIp).digest('hex');
-
-			const rateLimiterInput = {
-				userId: this.userId || undefined,
-				clientAddress: this.requestIp,
-				type: 'method',
-				name: method,
-				connectionId,
-			};
-
-			try {
-				DDPRateLimiter._increment(rateLimiterInput);
-
-				const rateLimitResult = DDPRateLimiter._check(rateLimiterInput);
-				if (!rateLimitResult.allowed) {
-					throw new Meteor.Error('too-many-requests', DDPRateLimiter.getErrorMessage(rateLimitResult), {
-						timeToReset: rateLimitResult.timeToReset,
-					});
-				}
-
-				return API.v1.success(mountResult({ id, result: await Meteor.callAsync(method, ...params) }));
-			} catch (err) {
-				if (!(err as any).isClientSafe && !(err as any).meteorError) {
-					SystemLogger.error({ msg: 'Exception while invoking method', err, method });
-				}
-				if (settings.get('Log_Level') === '2') {
-					Meteor._debug(`Exception while invoking method ${method}`, err);
-				}
-				return API.v1.failure(mountResult({ id, error: err }));
-			}
+		response: {
+			200: methodCallResponseSchema,
+			400: validateBadRequestErrorResponse,
+			429: ajv.compile({
+				type: 'object',
+				properties: { success: { type: 'boolean', enum: [false] }, error: { type: 'string' } },
+				required: ['success'],
+				additionalProperties: true,
+			}),
 		},
+	},
+	async function action() {
+		check(this.bodyParams, {
+			message: String,
+		});
+
+		const data = EJSON.parse(this.bodyParams.message);
+
+		if (!isMethodCallAnonProps(data)) {
+			return API.v1.failure('Invalid method call');
+		}
+
+		const { method, params, id } = data;
+
+		const connectionId =
+			this.token ||
+			crypto
+				.createHash('md5')
+				.update(this.requestIp ?? '')
+				.digest('hex');
+
+		const rateLimiterInput = {
+			userId: this.userId || undefined,
+			clientAddress: this.requestIp,
+			type: 'method',
+			name: method,
+			connectionId,
+		};
+
+		try {
+			DDPRateLimiter._increment(rateLimiterInput);
+
+			const rateLimitResult = DDPRateLimiter._check(rateLimiterInput);
+			if (!rateLimitResult.allowed) {
+				throw new Meteor.Error('too-many-requests', DDPRateLimiter.getErrorMessage(rateLimitResult), {
+					timeToReset: rateLimitResult.timeToReset,
+				});
+			}
+
+			return API.v1.success(mountResult({ id, result: await Meteor.callAsync(method, ...params) }));
+		} catch (err) {
+			if (!(err as any).isClientSafe && !(err as any).meteorError) {
+				SystemLogger.error({ msg: 'Exception while invoking method', err, method });
+			}
+			if (settings.get('Log_Level') === '2') {
+				Meteor._debug(`Exception while invoking method ${method}`, err);
+			}
+			return API.v1.failure(mountResult({ id, error: err }));
+		}
 	},
 );
 
-API.v1.addRoute(
+const smtpCheckResponseSchema = ajv.compile({
+	type: 'object',
+	properties: {
+		isSMTPConfigured: { type: 'boolean' },
+		success: { type: 'boolean', enum: [true] },
+	},
+	required: ['isSMTPConfigured', 'success'],
+	additionalProperties: false,
+});
+
+API.v1.get(
 	'smtp.check',
-	{ authRequired: true },
 	{
-		async get() {
-			return API.v1.success({ isSMTPConfigured: isSMTPConfigured() });
+		authRequired: true,
+		response: {
+			200: smtpCheckResponseSchema,
+			401: validateUnauthorizedErrorResponse,
 		},
 	},
+	async function action() {
+		return API.v1.success({ success: true, isSMTPConfigured: isSMTPConfigured() });
+	},
 );
+
+const fingerprintResponseSchema = ajv.compile({
+	type: 'object',
+	properties: { success: { type: 'boolean', enum: [true] } },
+	required: ['success'],
+	additionalProperties: false,
+});
 
 /**
  * @openapi
@@ -631,75 +737,78 @@ API.v1.addRoute(
  *              schema:
  *                $ref: '#/components/schemas/ApiFailureV1'
  */
-API.v1.addRoute(
+API.v1.post(
 	'fingerprint',
 	{
 		authRequired: true,
-		validateParams: isFingerprintProps,
+		body: isFingerprintProps,
+		response: {
+			200: fingerprintResponseSchema,
+			401: validateUnauthorizedErrorResponse,
+			400: validateBadRequestErrorResponse,
+		},
 	},
-	{
-		async post() {
-			check(this.bodyParams, {
-				setDeploymentAs: String,
-			});
+	async function action() {
+		check(this.bodyParams, {
+			setDeploymentAs: String,
+		});
 
-			const settingsIds: string[] = [];
+		const settingsIds: string[] = [];
 
-			if (this.bodyParams.setDeploymentAs === 'new-workspace') {
-				await WorkspaceCredentials.removeAllCredentials();
+		if (this.bodyParams.setDeploymentAs === 'new-workspace') {
+			await WorkspaceCredentials.removeAllCredentials();
 
-				settingsIds.push(
-					'Cloud_Service_Agree_PrivacyTerms',
-					'Cloud_Workspace_Id',
-					'Cloud_Workspace_Name',
-					'Cloud_Workspace_Client_Id',
-					'Cloud_Workspace_Client_Secret',
-					'Cloud_Workspace_Client_Secret_Expires_At',
-					'Cloud_Workspace_Registration_Client_Uri',
-					'Cloud_Workspace_PublicKey',
-					'Cloud_Workspace_License',
-					'Cloud_Workspace_Had_Trial',
-					'uniqueID',
-				);
+			settingsIds.push(
+				'Cloud_Service_Agree_PrivacyTerms',
+				'Cloud_Workspace_Id',
+				'Cloud_Workspace_Name',
+				'Cloud_Workspace_Client_Id',
+				'Cloud_Workspace_Client_Secret',
+				'Cloud_Workspace_Client_Secret_Expires_At',
+				'Cloud_Workspace_Registration_Client_Uri',
+				'Cloud_Workspace_PublicKey',
+				'Cloud_Workspace_License',
+				'Cloud_Workspace_Had_Trial',
+				'uniqueID',
+			);
+		}
+
+		settingsIds.push('Deployment_FingerPrint_Verified');
+
+		const auditSettingOperation = updateAuditedByUser({
+			_id: this.userId,
+			username: this.user.username ?? '',
+			ip: this.requestIp ?? '',
+			useragent: this.request.headers.get('user-agent') ?? '',
+		});
+
+		const promises = settingsIds.map((settingId) => {
+			if (settingId === 'uniqueID') {
+				return auditSettingOperation(Settings.resetValueById, 'uniqueID', process.env.DEPLOYMENT_ID || crypto.randomUUID());
 			}
 
-			settingsIds.push('Deployment_FingerPrint_Verified');
+			if (settingId === 'Cloud_Workspace_Access_Token_Expires_At') {
+				return auditSettingOperation(Settings.resetValueById, 'Cloud_Workspace_Access_Token_Expires_At', new Date(0));
+			}
 
-			const auditSettingOperation = updateAuditedByUser({
+			if (settingId === 'Deployment_FingerPrint_Verified') {
+				return auditSettingOperation(Settings.updateValueById, 'Deployment_FingerPrint_Verified', true);
+			}
+
+			return resetAuditedSettingByUser({
 				_id: this.userId,
-				username: this.user.username,
-				ip: this.requestIp,
-				useragent: this.request.headers.get('user-agent') || '',
-			});
+				username: this.user.username ?? '',
+				ip: this.requestIp ?? '',
+				useragent: this.request.headers.get('user-agent') ?? '',
+			})(Settings.resetValueById, settingId);
+		});
 
-			const promises = settingsIds.map((settingId) => {
-				if (settingId === 'uniqueID') {
-					return auditSettingOperation(Settings.resetValueById, 'uniqueID', process.env.DEPLOYMENT_ID || crypto.randomUUID());
-				}
+		(await Promise.all(promises)).forEach((value, index) => {
+			if (value?.modifiedCount) {
+				void notifyOnSettingChangedById(settingsIds[index]);
+			}
+		});
 
-				if (settingId === 'Cloud_Workspace_Access_Token_Expires_At') {
-					return auditSettingOperation(Settings.resetValueById, 'Cloud_Workspace_Access_Token_Expires_At', new Date(0));
-				}
-
-				if (settingId === 'Deployment_FingerPrint_Verified') {
-					return auditSettingOperation(Settings.updateValueById, 'Deployment_FingerPrint_Verified', true);
-				}
-
-				return resetAuditedSettingByUser({
-					_id: this.userId,
-					username: this.user.username,
-					ip: this.requestIp,
-					useragent: this.request.headers.get('user-agent') || '',
-				})(Settings.resetValueById, settingId);
-			});
-
-			(await Promise.all(promises)).forEach((value, index) => {
-				if (value?.modifiedCount) {
-					void notifyOnSettingChangedById(settingsIds[index]);
-				}
-			});
-
-			return API.v1.success({});
-		},
+		return API.v1.success({ success: true });
 	},
 );
