@@ -219,7 +219,7 @@ const e2eEndpoints = API.v1
 		async function action() {
 			const result = await Users.fetchKeysByUserId(this.userId);
 
-			return API.v1.success(result);
+			return API.v1.success({ ...result, success: true });
 		},
 	)
 	.get(
@@ -264,7 +264,7 @@ const e2eEndpoints = API.v1
 
 			const result = await getUsersOfRoomWithoutKeyMethod(this.userId, rid);
 
-			return API.v1.success(result);
+			return API.v1.success({ ...result, success: true });
 		},
 	)
 	.post(
@@ -364,6 +364,7 @@ const e2eEndpoints = API.v1
 			>((acc, { rid, users }) => ({ [rid]: users, ...acc }), {});
 
 			return API.v1.success({
+				success: true,
 				usersWaitingForE2EKeys,
 			});
 		},
@@ -467,6 +468,35 @@ const e2eEndpoints = API.v1
 				LockMap.delete(rid);
 			}
 		},
+	)
+	.post(
+		'e2e.setUserPublicAndPrivateKeys',
+		{
+			authRequired: true,
+			body: ise2eSetUserPublicAndPrivateKeysParamsPOST,
+			response: {
+				200: ajv.compile({
+					type: 'object',
+					properties: { success: { type: 'boolean', enum: [true] } },
+					required: ['success'],
+					additionalProperties: false,
+				}),
+				401: validateUnauthorizedErrorResponse,
+				400: validateBadRequestErrorResponse,
+			},
+		},
+		async function action() {
+			// eslint-disable-next-line @typescript-eslint/naming-convention
+			const { public_key, private_key, force } = this.bodyParams;
+
+			await setUserPublicAndPrivateKeysMethod(this.userId, {
+				public_key,
+				private_key,
+				force,
+			});
+
+			return API.v1.success({ success: true });
+		},
 	);
 
 /**
@@ -502,27 +532,6 @@ const e2eEndpoints = API.v1
  *              schema:
  *                $ref: '#/components/schemas/ApiFailureV1'
  */
-API.v1.addRoute(
-	'e2e.setUserPublicAndPrivateKeys',
-	{
-		authRequired: true,
-		validateParams: ise2eSetUserPublicAndPrivateKeysParamsPOST,
-	},
-	{
-		async post() {
-			// eslint-disable-next-line @typescript-eslint/naming-convention
-			const { public_key, private_key, force } = this.bodyParams;
-
-			await setUserPublicAndPrivateKeysMethod(this.userId, {
-				public_key,
-				private_key,
-				force,
-			});
-
-			return API.v1.success();
-		},
-	},
-);
 
 type E2eEndpoints = ExtractRoutesFromAPI<typeof e2eEndpoints>;
 
