@@ -93,7 +93,7 @@ API.v1.get(
 
 		const event = await Calendar.get(id);
 
-		if (!event || event.uid !== userId) {
+		if (event?.uid !== userId) {
 			return API.v1.failure();
 		}
 
@@ -113,16 +113,7 @@ API.v1.post(
 	},
 	async function action() {
 		const { userId: uid } = this;
-		const {
-			startTime,
-			endTime,
-			externalId,
-			subject,
-			description,
-			meetingUrl,
-			reminderMinutesBeforeStart,
-			busy,
-		} = this.bodyParams;
+		const { startTime, endTime, externalId, subject, description, meetingUrl, reminderMinutesBeforeStart, busy } = this.bodyParams;
 
 		const id = await Calendar.create({
 			uid,
@@ -152,16 +143,7 @@ API.v1.post(
 	},
 	async function action() {
 		const { userId: uid } = this;
-		const {
-			startTime,
-			endTime,
-			externalId,
-			subject,
-			description,
-			meetingUrl,
-			reminderMinutesBeforeStart,
-			busy,
-		} = this.bodyParams;
+		const { startTime, endTime, externalId, subject, description, meetingUrl, reminderMinutesBeforeStart, busy } = this.bodyParams;
 
 		const id = await Calendar.import({
 			uid,
@@ -191,20 +173,11 @@ API.v1.post(
 	},
 	async function action() {
 		const { userId } = this;
-		const {
-			eventId,
-			startTime,
-			endTime,
-			subject,
-			description,
-			meetingUrl,
-			reminderMinutesBeforeStart,
-			busy,
-		} = this.bodyParams;
+		const { eventId, startTime, endTime, subject, description, meetingUrl, reminderMinutesBeforeStart, busy } = this.bodyParams;
 
 		const event = await Calendar.get(eventId);
 
-		if (!event || event.uid !== userId) {
+		if (event?.uid !== userId) {
 			throw new Error('invalid-calendar-event');
 		}
 
@@ -238,7 +211,7 @@ API.v1.post(
 
 		const event = await Calendar.get(eventId);
 
-		if (!event || event.uid !== userId) {
+		if (event?.uid !== userId) {
 			throw new Error('invalid-calendar-event');
 		}
 
