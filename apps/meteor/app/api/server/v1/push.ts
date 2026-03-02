@@ -9,7 +9,6 @@ import {
 	validateForbiddenErrorResponse,
 } from '@rocket.chat/rest-typings';
 import type { JSONSchemaType } from 'ajv';
-import { Match, check } from 'meteor/check';
 import { Meteor } from 'meteor/meteor';
 
 import { executePushTest } from '../../../../server/lib/pushConfig';
@@ -205,20 +204,34 @@ const pushTokenEndpoints = API.v1
 
 			return API.v1.success();
 		},
-	);
-
-API.v1.addRoute(
-	'push.get',
-	{ authRequired: true },
-	{
-		async get() {
-			const params = this.queryParams;
-			check(
-				params,
-				Match.ObjectIncluding({
-					id: String,
+	)
+	.get(
+		'push.get',
+		{
+			authRequired: true,
+			query: ajv.compile<{ id: string }>({
+				type: 'object',
+				properties: {
+					id: { type: 'string' },
+				},
+				required: ['id'],
+				additionalProperties: false,
+			}),
+			response: {
+				200: ajv.compile({
+					type: 'object',
+					properties: {
+						data: {},
+						success: { type: 'boolean', enum: [true] },
+					},
+					required: ['data', 'success'],
+					additionalProperties: false,
 				}),
-			);
+				401: validateUnauthorizedErrorResponse,
+			},
+		},
+		async function action() {
+			const params = this.queryParams;
 
 			const receiver = await Users.findOneById(this.userId);
 			if (!receiver) {
@@ -243,14 +256,26 @@ API.v1.addRoute(
 
 			return API.v1.success({ data });
 		},
-	},
-);
-
-API.v1.addRoute(
-	'push.info',
-	{ authRequired: true },
-	{
-		async get() {
+	)
+	.get(
+		'push.info',
+		{
+			authRequired: true,
+			response: {
+				200: ajv.compile({
+					type: 'object',
+					properties: {
+						pushGatewayEnabled: { type: 'boolean' },
+						defaultPushGateway: { type: 'boolean' },
+						success: { type: 'boolean', enum: [true] },
+					},
+					required: ['pushGatewayEnabled', 'defaultPushGateway', 'success'],
+					additionalProperties: false,
+				}),
+				401: validateUnauthorizedErrorResponse,
+			},
+		},
+		async function action() {
 			const defaultGateway = (await Settings.findOneById('Push_gateway', { projection: { packageValue: 1 } }))?.packageValue;
 			const defaultPushGateway = settings.get('Push_gateway') === defaultGateway;
 			return API.v1.success({
@@ -258,8 +283,7 @@ API.v1.addRoute(
 				defaultPushGateway,
 			});
 		},
-	},
-);
+	);
 
 const pushTestEndpoints = API.v1.post(
 	'push.test',
